@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Pi-hole Control</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;700&family=Syne:wght@400;700;800&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="index.css"/>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div class="logo">Pi<span>·</span>hole</div>
+    <span class="version-tag">multi-instance</span>
+  </header>
+
+  <!-- Status card -->
+  <div class="card" id="statusCard">
+    <div class="status-row">
+      <span class="status-label">Overall Status</span>
+      <span class="status-badge">
+        <span class="dot green" id="statusDot"></span>
+        <span id="statusText">Checking…</span>
+      </span>
+    </div>
+
+    <!-- Per-instance pills -->
+    <div class="instances-row" id="instancesRow"></div>
+
+    <div class="countdown-block" id="countdownBlock">
+      <div class="countdown" id="countdownDisplay">00:00</div>
+      <div class="countdown-sub">until filtering resumes</div>
+    </div>
+    <div class="progress-wrap" id="progressWrap">
+      <div class="progress-bar" id="progressBar"></div>
+    </div>
+  </div>
+
+  <!-- Controls -->
+  <div class="card controls">
+    <div class="duration-row">
+      <span class="duration-label">Duration</span>
+      <div class="presets" id="presets">
+        <button class="preset active" data-sec="60">1m</button>
+        <button class="preset" data-sec="300">5m</button>
+        <button class="preset" data-sec="600">10m</button>
+        <button class="preset" data-sec="1800">30m</button>
+        <button class="preset" data-sec="3600">1h</button>
+      </div>
+    </div>
+    <div class="custom-row">
+      <span class="duration-label">Custom</span>
+      <input type="number" id="customSeconds" min="1" max="86400" placeholder="120"/>
+      <span class="unit-label">seconds</span>
+    </div>
+    <button class="btn btn-disable" id="btnDisable">Disable All Instances</button>
+    <button class="btn btn-enable"  id="btnEnable"  style="display:none">Re-enable All Now</button>
+  </div>
+
+  <div class="log-card">
+    <div class="log-title">Activity Log</div>
+    <ul class="log-list" id="logList"></ul>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  const API = '';
+  let selectedSeconds = 60;
+  let countdownInterval = null;
+  let disabledUntil = null;
+  let totalDisabledSeconds = null;
+
+  // ── Preset buttons ───────────────────────────────────────────────────────
+  document.querySelectorAll('.preset').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.preset').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      selectedSeconds = parseInt(btn.dataset.sec);
+      document.getElementById('customSeconds').value = '';
+    });
+  });
+  document.getElementById('customSeconds').addEventListener('input', e => {
+    if (e.target.value) {
+      document.querySelectorAll('.preset').forEach(b => b.classList.remove('active'));
+      selectedSeconds = parseInt(e.target.value);
+    }
+  });
+
+  // ── Render instance pills ────────────────────────────────────────────────
+  function renderInstances(instances) {
+    const row = document.getElementById('instancesRow');
+    row.innerHTML = '';
+    instances.forEach(inst => {
+        const isDisabled    = inst.status === 'disabled';
+        const isUnreachable = !inst.ok;
+
+        let pillClass = 'instance-pill ';
+        let dotClass  = 'pill-dot ';
+        let statusLabel = 'UNREACHABLE';
+
+        if (isUnreachable) {
+          pillClass += 'unreachable';
+          dotClass  += 'amber';
+        } else if (isDisabled) {
+          pillClass += 'ok-disabled';
+          dotClass  += 'red';
+	  statusLabel = inst.status.toUpperCase();
+        } else {
+          pillClass += 'ok-enabled';
+          dotClass  += 'green';
+	  if (inst.status) {
+	    statusLabel = inst.status.toUpperCase();
+	  }
+        }
+
+        const pill = document.createElement('div');
+        pill.className = pillClass;
+        pill.innerHTML = `
+          <span class="${dotClass}"></span>
+          <div class="pill-info">
+            <span class="pill-name">${inst.name}</span>
+            <span class="pill-status">${statusLabel}</span>
+          </div>`;
+        row.appendChild(pill);
+    });
+  }
+
+  // ── Countdown ────────────────────────────────────────────────────────────
+  function startCountdown(until, total) {
+    disabledUntil = new Date(until);
+    totalDisabledSeconds = total;
+    clearInterval(countdownInterval);
+    countdownInterval = setInterval(tick, 1000);
+    tick();
+  }
+  function tick() {
+    const remaining = Math.max(0, (disabledUntil - Date.now()) / 1000);
+    const m = String(Math.floor(remaining / 60)).padStart(2, '0');
+    const s = String(Math.floor(remaining % 60)).padStart(2, '0');
+    document.getElementById('countdownDisplay').textContent = `${m}:${s}`;
+    if (totalDisabledSeconds) {
+      document.getElementById('progressBar').style.width = ((remaining / totalDisabledSeconds) * 100) + '%';
+    }
+    if (remaining <= 0) { clearInterval(countdownInterval); setTimeout(fetchStatus, 1500); }
+  }
+  function stopCountdown() {
+    clearInterval(countdownInterval);
+    disabledUntil = null;
+    totalDisabledSeconds = null;
+  }
+
+  // ── UI state ─────────────────────────────────────────────────────────────
+  function setUIState(data) {
+    const isDisabled = data.filtering_disabled;
+    const card = document.getElementById('statusCard');
+    const dot  = document.getElementById('statusDot');
+    const txt  = document.getElementById('statusText');
+    const cb   = document.getElementById('countdownBlock');
+    const pw   = document.getElementById('progressWrap');
+    const bd   = document.getElementById('btnDisable');
+    const be   = document.getElementById('btnEnable');
+
+    // Check for partial failure
+    const instances = data.instances || [];
+    const anyUnreachable = instances.some(i => !i.ok);
+
+    if (isDisabled) {
+      card.className  = 'card disabled';
+      dot.className   = 'dot red';
+      txt.textContent = anyUnreachable ? 'PARTIAL' : 'DISABLED';
+      cb.classList.add('active');
+      pw.classList.add('active');
+      bd.style.display = 'none';
+      be.style.display = 'block';
+      if (data.disabled_until) {
+        startCountdown(data.disabled_until, data.seconds_remaining || 300);
+      }
+    } else {
+      card.className  = 'card enabled';
+      dot.className   = anyUnreachable ? 'dot amber' : 'dot green';
+      txt.textContent = anyUnreachable ? 'PARTIAL' : 'ENABLED';
+      cb.classList.remove('active');
+      pw.classList.remove('active');
+      bd.style.display = 'block';
+      be.style.display = 'none';
+      stopCountdown();
+    }
+
+    renderInstances(instances);
+  }
+
+  // ── API calls ─────────────────────────────────────────────────────────────
+  async function fetchStatus() {
+    try {
+      const r = await fetch(`${API}/api/status`);
+      const d = await r.json();
+      setUIState(d);
+    } catch(e) {
+      log('Cannot reach API server', 'err');
+    }
+  }
+
+  async function disableFiltering() {
+    const secs = selectedSeconds;
+    setBusy(true);
+    try {
+      const r = await fetch(`${API}/api/disable`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ seconds: secs })
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error((d.detail && d.detail.message) || 'Error');
+
+      const instances = d.instances || [];
+      const failed = instances.filter(i => !i.ok);
+
+      if (failed.length > 0) {
+        const names = failed.map(i => i.name).join(', ');
+        toast(`Disabled (${names} unreachable)`, true);
+        log(`Disabled for ${fmtDuration(secs)} — failed: ${names}`, 'warn');
+      } else {
+        toast(`All instances disabled for ${fmtDuration(secs)}`);
+        log(`All instances disabled for ${fmtDuration(secs)}`, 'ok');
+      }
+
+      setUIState({ filtering_disabled: true, disabled_until: d.disabled_until, seconds_remaining: secs, instances });
+    } catch(e) {
+      toast(e.message, true);
+      log(e.message, 'err');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function enableFiltering() {
+    setBusy(true);
+    try {
+      const r = await fetch(`${API}/api/enable`, { method: 'POST' });
+      const d = await r.json();
+      if (!r.ok) throw new Error((d.detail && d.detail.message) || 'Error');
+
+      const instances = d.instances || [];
+      const failed = instances.filter(i => !i.ok);
+
+      if (failed.length > 0) {
+        const names = failed.map(i => i.name).join(', ');
+        toast(`Re-enabled (${names} unreachable)`, true);
+        log(`Re-enabled — failed: ${names}`, 'warn');
+      } else {
+        toast('All instances re-enabled');
+        log('All instances re-enabled', 'ok');
+      }
+
+      setUIState({ filtering_disabled: false, instances });
+    } catch(e) {
+      toast(e.message, true);
+      log(e.message, 'err');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
+  function setBusy(busy) {
+    document.getElementById('btnDisable').disabled = busy;
+    document.getElementById('btnEnable').disabled  = busy;
+  }
+  function fmtDuration(secs) {
+    if (secs < 60)   return `${secs}s`;
+    if (secs < 3600) return `${Math.round(secs/60)}m`;
+    return `${(secs/3600).toFixed(1)}h`;
+  }
+  let toastTimer = null;
+  function toast(msg, isErr = false) {
+    const el = document.getElementById('toast');
+    el.textContent = msg;
+    el.style.borderColor = isErr ? 'var(--amber)' : 'var(--green)';
+    el.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove('show'), 3500);
+  }
+  function log(msg, type = 'info') {
+    const list = document.getElementById('logList');
+    const ts   = new Date().toLocaleTimeString('en-US', { hour12: false });
+    const li   = document.createElement('li');
+    li.className = type;
+    li.innerHTML = `<span class="ts">${ts}</span><span class="msg">${msg}</span>`;
+    list.prepend(li);
+    while (list.children.length > 20) list.lastChild.remove();
+  }
+
+  // ── Wire up ───────────────────────────────────────────────────────────────
+  document.getElementById('btnDisable').addEventListener('click', disableFiltering);
+  document.getElementById('btnEnable').addEventListener('click',  enableFiltering);
+
+  fetchStatus();
+  log('Controller started', 'info');
+  setInterval(fetchStatus, 15000);
+</script>
+</body>
+</html>
