@@ -1,31 +1,30 @@
 # Pi-hole Controller (Multi-Instance)
 
-A REST API + web UI for simultaneously disabling/re-enabling filtering across **two Pi-hole instances** in parallel.
+A REST API + web UI for simultaneously disabling/re-enabling filtering across **multiple Pi-hole instances** in parallel.
 
 ## Setup
 
-```bash
-pip install -r requirements.txt
+You will need to create a file containing the following configuration for each cluster. The default naming pattern is `instances.json`, but there is also an environment variable `INSTANCES_CONFIGURATION_FILE` that can be set to any file location.
 
-# Primary Pi-hole (required)
-export PIHOLE1_HOST="http://192.168.1.2"
-export PIHOLE1_API_KEY="your_primary_api_key"
-export PIHOLE1_NAME="Primary"         # optional display name
-
-# Secondary Pi-hole (optional — omit PIHOLE2_HOST to run single-instance)
-export PIHOLE2_HOST="http://192.168.1.3"
-export PIHOLE2_API_KEY="your_secondary_api_key"
-export PIHOLE2_NAME="Secondary"       # optional display name
-
-python app.py
+```json
+[
+  {
+    "host": "http://ServerFQDNorIP",
+    "password": "PiHole API Key",
+    "name": "Friendly Name"
+  },{
+    "host": "https://10.0.0.10:8443",
+    "password": "PiHole API Key",
+    "name": "A Different Friendly Name"
+  }
+  <etc...>
+]
 ```
-
-Open **http://localhost:8080** in your browser.
 
 ## How it works
 
-- `POST /api/disable` fans out to **both instances simultaneously** using `asyncio.gather`
-- If one instance fails, the other still gets disabled — the response includes a `partial: true` flag and lists which failed
+- `POST /api/disable` fans out to **all instances simultaneously** using `asyncio.gather`
+- If one instance fails, the others still gets disabled — the response includes a `partial: true` flag and lists which failed
 - A background task auto-re-enables both after the timer expires, even if you close the browser
 - The UI shows individual status pills for each instance
 
@@ -33,13 +32,8 @@ Open **http://localhost:8080** in your browser.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PIHOLE1_HOST` | `http://pi.hole` | Primary Pi-hole URL |
-| `PIHOLE1_API_KEY` | *(empty)* | Primary API token |
-| `PIHOLE1_NAME` | `Primary` | Display name |
-| `PIHOLE2_HOST` | *(empty)* | Secondary Pi-hole URL (omit to disable) |
-| `PIHOLE2_API_KEY` | *(empty)* | Secondary API token |
-| `PIHOLE2_NAME` | `Secondary` | Display name |
-| `DEFAULT_DISABLE_SECONDS` | `300` | Default disable duration |
+| `DEFAULT_DISABLE_SECONDS` | `300` | Default time that will be used when `seconds` is not provided |
+| `INSTANCES_CONFIGURATION_FILE` | *instances.json* | File containing Instance configuration information |
 
 ## REST API
 
