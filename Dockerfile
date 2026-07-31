@@ -1,4 +1,7 @@
-FROM python:3.13-slim
+# ===============================================
+# 1. BUILD STAGE - Full toolchain
+# ===============================================
+FROM python:3.13-slim AS build
 
 # Install system dependencies needed for building
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -12,6 +15,11 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     UV_CACHE_DIR=/tmp/uv-cache
+
+# ===============================================
+# 2. INSTALL STAGE - Dependencies and app
+# ===============================================
+FROM build AS install
 
 WORKDIR /app
 
@@ -27,6 +35,16 @@ RUN uv sync --frozen --no-dev
 # Copy application files and install the project
 COPY . .
 RUN uv pip install --no-deps .
+
+# ===============================================
+# 3. RUNTIME STAGE - Minimal production image
+# ===============================================
+FROM python:3.13-slim AS runtime
+
+# Install only runtime system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
 
 # Create non-root user for security
 RUN groupadd --gid 1001 appuser && \
