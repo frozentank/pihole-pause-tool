@@ -1,12 +1,7 @@
-# ===============================================
-# 1. BUILD STAGE - Full toolchain
-# ===============================================
-FROM python:3.13-slim AS build
+FROM python:3.13-slim
 
 # Install system dependencies needed for building
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl
 
@@ -18,11 +13,6 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     UV_CACHE_DIR=/tmp/uv-cache
 
-# ===============================================
-# 2. INSTALL STAGE - Dependencies and app
-# ===============================================
-FROM build AS install
-
 WORKDIR /app
 
 # Create a fresh virtual environment inside the image
@@ -32,25 +22,11 @@ ENV VIRTUAL_ENV=/app/.venv \
 
 # Install dependencies (leverage uv's speed and caching)
 COPY pyproject.toml uv.lock ./
-RUN --mount=type=cache,target=/tmp/uv-cache \
-    uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev
 
 # Copy application files and install the project
 COPY . .
-RUN --mount=type=cache,target=/tmp/uv-cache \
-    uv pip install --no-deps .
-
-# ===============================================
-# 3. RUNTIME STAGE - Minimal production image
-# ===============================================
-FROM python:3.13-slim AS runtime
-
-# Install only runtime system dependencies
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+RUN uv pip install --no-deps .
 
 # Create non-root user for security
 RUN groupadd --gid 1001 appuser && \
